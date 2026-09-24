@@ -1,0 +1,105 @@
+PR #17 — Ledger sync + client search
+Author: dawit.m
+Description: Pushes transfers to the core ledger with retries so a flaky network
+doesn't lose them, and adds a client-name search for the advisor portal.
+
+diff --git a/app/services/ledger_client.py b/app/services/ledger_client.py
+new file mode 100644
+--- /dev/null
++++ b/app/services/ledger_client.py
+@@ -0,0 +1,38 @@
++"""Client for the downstream core-ledger service."""
++import logging
++import time
++from datetime import datetime
++
++import httpx
++
++log = logging.getLogger(__name__)
++LEDGER_URL = "https://ledger.internal.example/api"
++
++
++def with_retry(fn, attempts=3, backoff=0.5):
++    def wrapper(*args, **kwargs):
++        for i in range(attempts):
++            try:
++                return fn(*args, **kwargs)
++            except httpx.HTTPError:
++                if i == attempts - 1:
++                    raise
++                time.sleep(backoff * (2 ** i))
++    return wrapper
++
++
++@with_retry
++def post_transfer(from_account_number: str, to_account_number: str, amount: str) -> dict:
++    payload = {
++        "from": from_account_number,
++        "to": to_account_number,
++        "amount": amount,
++        "submitted_at": datetime.now().isoformat(),
++    }
++    try:
++        resp = httpx.post(f"{LEDGER_URL}/transfers", json=payload, timeout=5.0)
++        resp.raise_for_status()
++        return resp.json()
++    except httpx.HTTPError:
++        log.error("ledger transfer failed from %s to %s", from_account_number, to_account_number)
++        raise
+diff --git a/app/routes/search.py b/app/routes/search.py
+new file mode 100644
+--- /dev/null
++++ b/app/routes/search.py
+@@ -0,0 +1,18 @@
++import sqlite3
++
++from fastapi import APIRouter, Depends
++
++from app.db import get_conn
++
++router = APIRouter()
++
++
++@router.get("/accounts/search")
++def search_accounts(name: str, conn: sqlite3.Connection = Depends(get_conn)):
++    try:
++        rows = conn.execute(
++            f"SELECT id, client_name FROM accounts WHERE client_name LIKE '%{name}%' ORDER BY client_name"
++        ).fetchall()
++        return {"results": [{"id": r["id"], "client_name": r["client_name"]} for r in rows]}
++    except Exception:
++        return {"results": []}
+diff --git a/app/main.py b/app/main.py
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,7 +1,8 @@
+ from fastapi import FastAPI
+ 
+-from app.routes import accounts, transfers
++from app.routes import accounts, search, transfers
+ 
+ app = FastAPI(title="advisor-accounts")
++app.include_router(search.router)
+ app.include_router(accounts.router)
+ app.include_router(transfers.router)
+diff --git a/app/routes/transfers.py b/app/routes/transfers.py
+--- a/app/routes/transfers.py
++++ b/app/routes/transfers.py
+@@ -5,7 +5,8 @@ from datetime import datetime, timezone
+ from fastapi import APIRouter, Depends, HTTPException
+ 
+ from app.db import get_conn
+ from app.models import TransferRequest, TransferResponse
++from app.services.ledger_client import post_transfer
+ 
+ router = APIRouter()
+ 
+@@ -38,5 +39,8 @@ def create_transfer(req: TransferRequest, conn: sqlite3.Connection = Depends(get_conn)):
+         "INSERT INTO transactions (account_id, type, amount, created_at, transfer_id) VALUES (?, 'transfer_in', ?, ?, ?)",
+         (req.to_account, req.amount, now, transfer_id),
+     )
+     conn.commit()
++    numbers = {r["id"]: r["account_number"] for r in conn.execute(
++        "SELECT id, account_number FROM accounts WHERE id IN (?, ?)", (req.from_account, req.to_account))}
++    post_transfer(numbers[req.from_account], numbers[req.to_account], str(req.amount))
+     return {"transfer_id": transfer_id, "from_balance": str(new_src), "to_balance": str(new_dst)}
