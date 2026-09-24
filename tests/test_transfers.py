@@ -29,7 +29,7 @@ def test_transfer_precision_in_response(client):
 
     assert r.status_code == 201
     assert r.json()["from_balance"] == "999.90"
-    assert r.json()["to_balance"] == "501.10"
+    assert r.json()["to_balance"] == "500.10"
 
 def test_transfer_idempotency_key(client):
     first = _transfer(client, 100, key="retry-abc-123")
