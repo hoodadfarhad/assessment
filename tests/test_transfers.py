@@ -24,6 +24,12 @@ def test_transfer_precision(client):
     assert client.get("/accounts/ACC-1001").json()["balance"] == "999.00"
     assert client.get("/accounts/ACC-1002").json()["balance"] == "501.00"
 
+def test_transfer_precision_in_response(client):
+    r = _transfer(client, 0.10)
+
+    assert r.status_code == 201
+    assert r.json()["from_balance"] == "999.90"
+    assert r.json()["to_balance"] == "501.10"
 
 def test_transfer_idempotency_key(client):
     first = _transfer(client, 100, key="retry-abc-123")
@@ -31,3 +37,4 @@ def test_transfer_idempotency_key(client):
     assert first.status_code == 201
     assert second.json()["transfer_id"] == first.json()["transfer_id"]
     assert client.get("/accounts/ACC-1001").json()["balance"] == "900.00"
+
